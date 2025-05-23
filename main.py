@@ -9,7 +9,7 @@ import numpy as np
 # - integrate initialization
 
 precision = ti.f32
-device = ti.cpu
+device = ti.cuda
 
 ti.init(arch=device, default_fp=precision)
 
@@ -228,7 +228,7 @@ while window.running:
 		update_positions_Verlet()
 		update_collisons()
 
-	visible_positions.from_numpy(np.insert(positions.to_numpy(), 1, 0,
+	visible_positions.from_numpy(np.insert(positions.to_numpy(), 2, 0,
 	                                       axis=-1))
 
 	# Draw particles
@@ -237,9 +237,8 @@ while window.running:
 	camera.lookat(0.5, 0.5, 0)
 	camera.up(0, 1, 0)
 	scene.ambient_light([0.2, 0.2, 0.2])
-	scene.point_light(pos=(0.5, 0.5, 2.0), color=(1., 1., 1.))
-	scene.particles(visible_positions,
-	                visible_radii,
-	                per_vertex_color=(1., 1., 1.))
+	scene.point_light(pos=(0.5, 0.5, 0.5), color=(1., 1., 1.))
+	scene.particles(visible_positions, 0, per_vertex_radius=radii)
+	scene.set_camera(camera)
 	canvas.scene(scene)
 	window.show()
