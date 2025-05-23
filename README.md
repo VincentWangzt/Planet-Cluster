@@ -1,4 +1,4 @@
-# Planet Cluster
+# Planet-Cluster
 
 This is a star cluster simulator based on `taichi`. 
 
