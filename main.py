@@ -1,5 +1,11 @@
 import taichi as ti
 
+# TODO:
+# - collision rewrite -> faster
+# - 3d ggui
+# - bit mask
+# - pack the fields together
+
 precision = ti.f32
 device = ti.cpu
 
