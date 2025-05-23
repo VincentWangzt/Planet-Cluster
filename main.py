@@ -1,10 +1,12 @@
 import taichi as ti
+import numpy as np
 
 # TODO:
 # - collision rewrite -> faster
 # - 3d ggui
 # - bit mask
 # - pack the fields together
+# - integrate initialization
 
 precision = ti.f32
 device = ti.cpu
@@ -23,7 +25,7 @@ scheme = "Verlet"  # "Euler" or "Verlet"
 # Particle properties
 positions = ti.Vector.field(2, dtype=float, shape=num_particles)
 positions_stock = ti.Vector.field(2, dtype=float, shape=num_particles)
-visible_positions = ti.Vector.field(2, dtype=float, shape=num_particles)
+visible_positions = ti.Vector.field(3, dtype=float, shape=num_particles)
 
 velocities = ti.Vector.field(2, dtype=float, shape=num_particles)
 # velocities_stock = ti.Vector.field(2, dtype=float, shape=num_particles)
@@ -208,10 +210,15 @@ initialize_particles()
 
 # GUI
 gui_res = (800, 800)
-gui = ti.GUI("N-body Simulation", res=gui_res, background_color=0x000000)
+
+window = ti.ui.Window("N-body simulation", gui_res, vsync=True, pos=(50, 50))
+canvas = window.get_canvas()
+canvas.set_background_color((1., 1., 1.))
+scene = window.get_scene()
+camera = ti.ui.Camera()
 
 # Simulation loop
-while gui.running:
+while window.running:
 	# for _ in range(2):  # Substeps for stability
 	if scheme == "Euler":
 		compute_forces()
@@ -221,13 +228,18 @@ while gui.running:
 		update_positions_Verlet()
 		update_collisons()
 
+	visible_positions.from_numpy(np.insert(positions.to_numpy(), 1, 0,
+	                                       axis=-1))
+
 	# Draw particles
 	# Sun in yellow, others in white
-	gui.circles(positions.to_numpy()[1:],
-	            radius=visible_radii.to_numpy()[1:],
-	            color=0xFFFFFF)
-	gui.circles(positions.to_numpy()[0:1],
-	            radius=visible_radii.to_numpy()[0:1],
-	            color=0xFFD700)  # Sun
-
-	gui.show()
+	camera.position(0.5, 0.5, 2.0)
+	camera.lookat(0.5, 0.5, 0)
+	camera.up(0, 1, 0)
+	scene.ambient_light([0.2, 0.2, 0.2])
+	scene.point_light(pos=(0.5, 0.5, 2.0), color=(1., 1., 1.))
+	scene.particles(visible_positions,
+	                visible_radii,
+	                per_vertex_color=(1., 1., 1.))
+	canvas.scene(scene)
+	window.show()
