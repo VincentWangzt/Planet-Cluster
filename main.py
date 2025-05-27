@@ -23,7 +23,7 @@ sun_pos_tuple = (0.5, 0.5, 0.)  # Center of the screen for camera lookat
 init_camera_pos = (0.5, 0.5, 2.)  # Camera position for visualization
 gui_res = (1600, 1600)
 init_step_per_frame = 6  # Number of steps per frame for smoother and faster animation
-simu_fps = 30  # frames per second for simulation mode
+init_target_fps = 30  # Target FPS for simulation and display modes
 
 # ========================================
 
@@ -36,12 +36,14 @@ particles_mass_lowerbound = 1e10  # 小行星质量下限
 particles_mass_uperbound = 1e12  #小行星质量上线
 ring_inner = 1.22e8  #球壳内半径
 ring_outer = 1.29e8  #球壳外半径
-dt = 60.  # 模拟分辨率，最好别动
+original_dt_value = 60.  # 模拟分辨率 (seconds per simulation step in model time)
 compact_rate = 0.5  # 压缩率，压缩率越大，压缩越频繁
 
 # ==================================================
 
+unscaled_dt_value = original_dt_value
 step_per_frame = init_step_per_frame  # Number of steps per frame for smoother animation
+target_fps = init_target_fps  # Initialize target_fps
 num_particles = init_num_particles  # Number of particles in the simulation
 sun_pos = ti.Vector(sun_pos_tuple)  # Center of the screen
 sun_mass = sun_mass / Mass_scale  # Scale the sun mass for visualization
@@ -52,7 +54,7 @@ ring_inner = ring_inner / Length_scale  # Scale the ring inner radius for visual
 ring_outer = ring_outer / Length_scale  # Scale the ring outer radius for visualization
 ring_center = (ring_inner + ring_outer) / 2
 ring_width = ring_outer - ring_inner
-dt = dt / Time_scale  # Scale the timestep for visualization
+dt = unscaled_dt_value / Time_scale  # Scale the timestep for simulation
 particles_vertices_lowerbound = 15e4
 particles_vertices_uperbound = 21e4
 particles_vertices_lowerbound = particles_vertices_lowerbound * Time_scale / Length_scale
@@ -281,27 +283,62 @@ camera.lookat(*sun_pos_tuple)
 paused = True
 restart_flag = False
 simulation = False  # Flag for accelerating simulation
+display_mode = False  # Flag for new display mode
 # Camera control state variables
 orbit_sun_fixed_radius = False  # Default to not orbiting the sun with a fixed radius
 always_look_at_sun = True  # Default to looking at the sun
 
 # num_particles = 5000
+fps = 1
 
 last_time = time.time()  # For FPS calculation
 while window.running:
 
 	with gui.sub_window("Controls", 0.05, 0.05, 0.2,
-	                    0.12):  # Adjusted height from 0.1 to 0.12
+	                    0.25):  # Adjusted height to 0.25
 		button_text = "Resume" if paused else "Pause"
 		if gui.button(button_text):
 			paused = not paused
 		if gui.button("Restart"):
 			restart_flag = True
-		simulation = gui.checkbox("Simulation Mode", simulation)
+
+		# Store previous checkbox states to detect user clicks
+		prev_simulation_checkbox_state = simulation
+		new_simulation_val = gui.checkbox("Simulation Mode", simulation)
+
+		prev_display_mode_checkbox_state = display_mode
+		new_display_mode_val = gui.checkbox("Display Mode", display_mode)
+
+		# Handle changes initiated by user clicking checkboxes for mutual exclusivity
+		if new_simulation_val != prev_simulation_checkbox_state:  # User clicked simulation checkbox
+			simulation = new_simulation_val
+			if simulation:  # If simulation was turned ON
+				display_mode = False  # Turn off display mode if simulation is on
+				target_fps = init_target_fps  # Reset target_fps for simulation mode
+		elif new_display_mode_val != prev_display_mode_checkbox_state:  # User clicked display_mode checkbox
+			display_mode = new_display_mode_val
+			if display_mode:  # If display_mode was turned ON
+				simulation = False  # Turn off simulation mode if display mode is on
+				step_per_frame = init_step_per_frame  # Reset steps per frame for display mode
+				target_fps = init_target_fps  # Reset target_fps for display mode
+
+		if simulation or display_mode:
+			target_fps = gui.slider_int("Target FPS", target_fps, 10, 30)
+
+		if display_mode:
+			gui.text("Display Mode Controls:")
+			step_per_frame = gui.slider_int(
+			    "Steps Per Frame", step_per_frame, 1,
+			    20)  # Max value 20 as per user's file
+			# unscaled_dt_value slider removed for display mode
 
 	# Camera Controls GUI
-	with gui.sub_window("Camera Controls", 0.05, 0.16, 0.2,
-	                    0.12):  # Positioned below "Controls"
+	with gui.sub_window(
+	    "Camera Controls",
+	    0.05,
+	    0.31,
+	    0.2,  # y changed from 0.26 to 0.31
+	    0.12):  # Positioned below "Controls"
 		orbit_sun_fixed_radius = gui.checkbox(
 		    "Orbit Sun (Radius 2)",
 		    orbit_sun_fixed_radius)  # Updated label and variable
@@ -342,15 +379,24 @@ while window.running:
 	# then we decrease num_particles
 	if num_particles > 1 and num_active_particles < (num_particles -
 	                                                 1) * compact_rate:
-		new_total_particles = compact_particles_kernel(num_particles)
-		if new_total_particles < num_particles and new_total_particles > 0:  # Ensure it decreased and is valid
-			num_particles = new_total_particles
-			# print(f"Compaction occurred. New num_particles: {num_particles}") # Optional debug
+		new_total_particles_auto = compact_particles_kernel(num_particles)
+		if new_total_particles_auto < num_particles and new_total_particles_auto > 0:  # Ensure it decreased and is valid
+			num_particles = new_total_particles_auto
+			# print(f"Auto compaction. New num_particles: {num_particles}") # Optional debug
 
 	# Particle Statistics GUI
-	with gui.sub_window("Particle Statistics", 0.05, 0.29, 0.2,
-	                    0.3):  # x, y, width, height
-		gui.text(f"Active Particles: {num_active_particles}")
+	with gui.sub_window("Particle Statistics", 0.05, 0.44, 0.2,
+	                    0.35):  # Adjusted height from 0.3 to 0.35
+		gui.text(f"Active Particles: {num_particles}")  # Added
+		gui.text(
+		    f"Effective Particles: {num_active_particles}")  # Changed label
+		if gui.button("Compact Particles Manually"):  # Added button
+			if num_particles > 1:  # Ensure there's more than just the sun
+				new_compacted_num = compact_particles_kernel(num_particles)
+				if new_compacted_num < num_particles and new_compacted_num > 0:
+					num_particles = new_compacted_num
+					# print(f"Manual compaction. New num_particles: {num_particles}")
+		gui.text(f"Sun Mass: {masses_np[0]:.2e}")  # Added Sun Mass display
 		gui.text(f"Total Mass: {total_mass_val:.2e}")
 		gui.text("Top 10 Particles by Mass:")
 		if num_active_particles > 0:
@@ -359,13 +405,29 @@ while window.running:
 		else:
 			gui.text("  No active particles.")
 
+	# Simulation Info GUI
+	with gui.sub_window(
+	    "Simulation Info",
+	    0.05,
+	    0.80,  # Adjusted y from 0.75 to 0.80
+	    0.2,
+	    0.14):  # Height remains 0.14
+		gui.text(f"Target FPS: {target_fps}")
+		gui.text(f"Actual FPS: {fps:.2f}")  # Added Actual FPS display
+		gui.text(f"Step per frame: {step_per_frame}")
+		time_speed_up_factor = unscaled_dt_value * step_per_frame * fps * int(
+		    not paused)  # Calculate based on original dt
+		gui.text(f"Time Speed Up: {time_speed_up_factor:.2f}x")
+
 	if restart_flag:
 		num_particles = init_num_particles
 		initialize_particles(num_particles)
 		paused = True  # Pause simulation after restart
 		restart_flag = False
 		simulation = False  # Reset simulation mode
+		display_mode = False  # Reset display mode
 		step_per_frame = init_step_per_frame  # Reset steps per frame
+		target_fps = init_target_fps  # Reset target_fps
 
 	if not paused:
 		for i in range(step_per_frame):
@@ -429,29 +491,43 @@ while window.running:
 	canvas.scene(scene)
 	window.show()
 
+	# Sleep logic for Display Mode to try and match target_fps
+	if display_mode and not paused and target_fps > 0:
+		# last_time is the timestamp from the beginning of the current frame's processing
+		# time.time() is the current time, after window.show()
+		desired_frame_duration = 1.0 / target_fps
+		actual_elapsed_time_for_frame = time.time(
+		) - last_time  # Time spent so far in this frame
+
+		sleep_duration = desired_frame_duration - actual_elapsed_time_for_frame * 2
+		if sleep_duration > 0:
+			time.sleep(sleep_duration)
+
 	current_time = time.time()
 	delta_time = current_time - last_time
 	if delta_time > 1e-9:
 		fps = 1.0 / delta_time
 	else:
-		fps = simu_fps  # Default to max_fps if delta_time is zero or too small
+		fps = target_fps  # Default to target_fps if delta_time is zero or too small
 	last_time = current_time
 
 	# FPS and step_per_frame adjustment logic
-	if simulation:
-		# Try to increase steps if FPS is comfortably above simu_fps
-		if fps > (simu_fps * 1.1 + 1):
-			step_per_frame *= (fps / simu_fps) / 1.1
+	if simulation and not paused:  # display_mode is implicitly False here due to mutual exclusivity
+		# Try to increase steps if FPS is comfortably above target_fps
+		if fps > (target_fps * 1.1 + 1):  # Use target_fps
+			step_per_frame *= (fps / target_fps) / 1.1  # Use target_fps
 			step_per_frame = int(step_per_frame)
-		elif fps > simu_fps + 1:
-			# Increase steps if FPS is above simu_fps but not too high
+		elif fps > target_fps + 1:  # Use target_fps
+			# Increase steps if FPS is above target_fps but not too high
 			step_per_frame += 1
-		# Decrease steps if FPS is lower than simu_fps, but not below init_step_per_frame
-		elif fps < simu_fps and step_per_frame > init_step_per_frame:
+		# Decrease steps if FPS is lower than target_fps, but not below init_step_per_frame
+		elif fps < target_fps and step_per_frame > init_step_per_frame:  # Use target_fps
 			step_per_frame -= 1
 
 		# Ensure step_per_frame is at least init_step_per_frame when accelerating
 		step_per_frame = max(init_step_per_frame, step_per_frame)
 	else:
-		# Reset to initial steps per frame if acceleration is off
-		step_per_frame = init_step_per_frame
+		# Reset to initial steps per frame if acceleration is off or paused,
+		# but only if not in display_mode (which has its own step_per_frame control)
+		if not display_mode:
+			step_per_frame = init_step_per_frame
