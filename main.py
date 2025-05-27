@@ -1,62 +1,136 @@
 import taichi as ti
 import numpy as np
+import time
 
 # TODO:
 # - collision rewrite -> faster
-# - 3d ggui
 # - bit mask
 # - pack the fields together
 # - integrate initialization
+# - visualization improvements
 
 precision = ti.f32
-device = ti.cuda
-
+device = ti.gpu
+Length_scale = 2.44e8
+Mass_scale = 5e10  # Scale for masses to make them visually significant
+Time_scale = 3600 * 1e7  # Scale for time to make the simulation run at a reasonable speed
 ti.init(arch=device, default_fp=precision)
 
-num_particles = 10000
-dt = 1e-6  # Timestep
+# =========================================
+# 可视化常数
+
+sun_pos_tuple = (0.5, 0.5, 0.)  # Center of the screen for camera lookat
+init_camera_pos = (0.5, 0.5, 2.)  # Camera position for visualization
+gui_res = (1600, 1600)
+step_per_frame = 6  # Number of steps per frame for smoother and faster animation
+
+# ========================================
+
+# ========================================
+# 模拟超参数都在这里
+
+num_particles = 10000  # 星体数量
+sun_mass = 1.898 * 1e27  # 中心星体质量
+particles_mass_lowerbound = 1e10  # 小行星质量下限
+particles_mass_uperbound = 1e12  #小行星质量上线
+ring_inner = 1.22e8  #球壳内半径
+ring_outer = 1.29e8  #球壳外半径
+dt = 60.  # 模拟分辨率，最好别动
+
+# ==================================================
+
+sun_pos = ti.Vector(sun_pos_tuple)  # Center of the screen
+sun_mass = sun_mass / Mass_scale  # Scale the sun mass for visualization
+particles_mass_lowerbound = particles_mass_lowerbound / Mass_scale
+particles_mass_uperbound = particles_mass_uperbound / Mass_scale
+particles_mass_width = particles_mass_uperbound - particles_mass_lowerbound
+ring_inner = ring_inner / Length_scale  # Scale the ring inner radius for visualization
+ring_outer = ring_outer / Length_scale  # Scale the ring outer radius for visualization
+ring_center = (ring_inner + ring_outer) / 2
+ring_width = ring_outer - ring_inner
+dt = dt / Time_scale  # Scale the timestep for visualization
+particles_vertices_lowerbound = 15e4
+particles_vertices_uperbound = 21e4
+particles_vertices_lowerbound = particles_vertices_lowerbound * Time_scale / Length_scale
+particles_vertices_uperbound = particles_vertices_uperbound * Time_scale / Length_scale
+particles_vertices_width = particles_vertices_uperbound - particles_vertices_lowerbound
 G = 6.67430e-11  # Gravitational constant - using a scaled value for visualization
 # For visualization purposes, we might need to scale G or masses, or use a different dt
 # Let's use a more visual-friendly G
-G_viz = 1e-2
+G_viz = G * Time_scale**2 / (Length_scale**3 / Mass_scale)
 
+# radius calculation
+radii_coeff = 6e-4  # coefficient for converting mass to radius
+sun_radii_coeff = 1e-4  # additional coefficient for sun radius
+
+softening_dis = radii_coeff
 scheme = "Verlet"  # "Euler" or "Verlet"
+vec = ti.types.vector(3, dtype=float)
 
 # Particle properties
-positions = ti.Vector.field(2, dtype=float, shape=num_particles)
-positions_stock = ti.Vector.field(2, dtype=float, shape=num_particles)
-visible_positions = ti.Vector.field(3, dtype=float, shape=num_particles)
+positions = ti.Vector.field(3, dtype=float, shape=num_particles)
+positions_stock = ti.Vector.field(3, dtype=float, shape=num_particles)
 
-velocities = ti.Vector.field(2, dtype=float, shape=num_particles)
-# velocities_stock = ti.Vector.field(2, dtype=float, shape=num_particles)
+velocities = ti.Vector.field(3, dtype=float, shape=num_particles)
 
-# acceleration_stock = ti.Vector.field(2, dtype=float, shape=num_particles)
-acceleration = ti.Vector.field(2, dtype=float, shape=num_particles)
+acceleration = ti.Vector.field(3, dtype=float, shape=num_particles)
 
 masses = ti.field(dtype=float, shape=num_particles)
 radii = ti.field(dtype=float, shape=num_particles)
-visible_radii = ti.field(dtype=float, shape=num_particles)
 
-# Sun properties
-sun_mass = 1e9
-sun_pos = ti.Vector([0.5, 0.5])  # Center of the screen
 
-vec = ti.types.vector(2, dtype=float)
+@ti.kernel
+def initialize_particles():
+	# Initialize Sun
+	masses[0] = sun_mass
+	positions[0] = sun_pos
+	velocities[0] = ti.Vector([0.0, 0.0, 0.0])
 
-radii_coeff = 3e-4  # coefficient for converting mass to radius
-sun_radii_coeff = 1e-1  # additional coefficient for sun radius
+	# Initialize other particles
+	for i in range(1, num_particles):
+		# ===============================================================
+		# 初始化函数， 修改这里
+		# ToDo:
+		# 1. 径向速度
+		# 2. 改变分布
+		# 3. 环面
+		u = ti.random()
+		v = ti.random()
+		w = ti.random()
 
-# plotted_radius = (visible_radii_coeff * radius + 1) ** visible_radii_power
-visible_radii_coeff = 3e2  # coefficient for plotting the radius
-visible_radii_power = 1  # power for plotting the radius
+		r = ring_width * (u**(1 / 3)) + ring_inner  # 保证球体内均匀分布
+		theta = ti.acos(2 * v - 1)  # 极角 [0, π]
+		phi = 2 * ti.math.pi * w  # 方位角 [0, 2π]
 
-softening_dis = radii_coeff
+		pos_x = sun_pos[0] + r * ti.sin(theta) * ti.cos(phi)
+		pos_y = sun_pos[1] + r * ti.sin(theta) * ti.sin(phi)
+		pos_z = sun_pos[2] + r * ti.cos(theta)
+
+		dx = pos_x - sun_pos[0]
+		dy = pos_y - sun_pos[1]
+		dz = pos_z - sun_pos[2]
+
+		r_vec = ti.Vector([dx, dy, dz])
+		# 任取一个不平行的向量，比如z轴
+		ref = ti.Vector([0.0, 0.0, 1.0])  # 先给一个默认值
+		if abs(r_vec[0]) < 1e-6 and abs(r_vec[1]) < 1e-6:
+			ref = ti.Vector([0.0, 1.0, 0.0])
+
+		tangent = r_vec.cross(ref).normalized()  # cross: 矢量叉乘， normalize：单位向量
+		vel_mag = (G_viz * sun_mass / r)**0.5  # 环绕速度大小，不改
+		# 切向速度=速度单位矢量*速度大小*随机大小因子
+		velocities[i] = tangent * vel_mag * (ti.random() * 0.1 + 0.95)
+		#====================================================================
+		masses[
+		    i] = ti.random() * particles_mass_width + particles_mass_lowerbound
+		positions[i] = ti.Vector([pos_x, pos_y, pos_z])
+		positions_stock[i] = positions[i]
+	update_radii(masses, radii, num_particles)
 
 
 @ti.func
-def calculate_pairwise_acceleration(i, j, positions, masses, G_viz,
-                                    softening) -> vec:
-	acc_contribution = ti.Vector([0.0, 0.0])
+def calculate_pairwise_acceleration(i, j, positions, masses, G_viz, softening):
+	acc_contribution = ti.Vector([0.0, 0.0, 0.0])
 	r_vec = positions[j] - positions[i]
 	dist = r_vec.norm()  # Squared distance
 
@@ -67,69 +141,25 @@ def calculate_pairwise_acceleration(i, j, positions, masses, G_viz,
 
 
 @ti.func
-def update_radii(all_masses, all_radii, visible_radii, total_num_particles):
+def update_radii(all_masses, all_radii, total_num_particles):
 	for i in range(total_num_particles):
 		all_radii[i] = all_masses[i]**(1 / 3) * radii_coeff
-		visible_radii[i] = (visible_radii_coeff * all_radii[i] +
-		                    1)**visible_radii_power * ti.math.sign(
-		                        all_masses[i])
 
 	all_radii[0] = all_radii[0] * sun_radii_coeff
-	visible_radii[0] = (visible_radii_coeff * all_radii[0] +
-	                    1)**visible_radii_power
 
 
 @ti.func
 def compute_total_acceleration_on_particle(p_i, all_positions, all_masses,
                                            current_G_viz, total_num_particles,
-                                           current_softening) -> vec:
-	acc_sum = ti.Vector([0.0, 0.0])
-	for p_j in range(total_num_particles):
+                                           current_softening):
+	acc_sum = ti.Vector([0.0, 0.0, 0.0])
+	for p_j in range(num_particles):
 		if p_i == p_j:
 			continue
 		acc_sum += calculate_pairwise_acceleration(p_i, p_j, all_positions,
 		                                           all_masses, current_G_viz,
 		                                           current_softening)
 	return acc_sum
-
-
-@ti.kernel
-def initialize_particles():
-	# Initialize Sun
-	masses[0] = sun_mass
-	positions[0] = sun_pos
-	velocities[0] = ti.Vector([0.0, 0.0])
-
-	# Initialize other particles
-	for i in range(1, num_particles):
-		r = ti.random() * 0.4 + 0.1  # Distance from sun (0.1 to 0.5)
-		angle = ti.random() * 2 * ti.math.pi
-		pos_x = sun_pos[0] + r * ti.cos(angle)
-		pos_y = sun_pos[1] + r * ti.sin(angle)
-		positions[i] = ti.Vector([pos_x, pos_y])
-		positions_stock[i] = positions[i]
-
-		# Give some initial orbital velocity
-		# Velocity perpendicular to the vector from sun to particle
-		# Magnitude chosen to be somewhat stable, can be tuned
-		dist_sq = r**2
-		if dist_sq > 1e-6:  # avoid division by zero if particle is at sun's position
-			# Circular orbit velocity: v = sqrt(G * M_sun / r)
-			# We use G_viz here
-			vel_mag = (G_viz * sun_mass / r)**0.5
-			# Direction perpendicular to (pos - sun_pos)
-			# If (dx, dy) is vector from sun, perpendicular is (-dy, dx) or (dy, -dx)
-			dx = pos_x - sun_pos[0]
-			dy = pos_y - sun_pos[1]
-			velocities[i] = ti.Vector([-dy, dx]).normalized() * vel_mag * (
-			    ti.random() * 0.1 + 0.95
-			)  # factor to make orbits more dynamic/less stable initially
-		else:
-			velocities[i] = ti.Vector([0.0, 0.0])
-		# velocities_stock[i] = velocities[i]
-		# velocities[i] = ti.Vector([0.0, 0.0])
-		masses[i] = ti.randn() * 1. + 3.
-		update_radii(masses, radii, visible_radii, num_particles)
 
 
 @ti.kernel
@@ -153,15 +183,6 @@ def update_positions():
 		if i == 0:  # Sun is fixed
 			continue
 		positions[i] += velocities[i] * dt
-
-		# # Boundary conditions (optional: particles can escape or wrap around)
-		# # Simple reflection for now
-		# if positions[i][0] < 0 or positions[i][0] > 1:
-		# 	velocities[i][0] *= -0.8  # Lose some energy on bounce
-		# 	positions[i][0] = ti.max(0, ti.min(1, positions[i][0]))
-		# if positions[i][1] < 0 or positions[i][1] > 1:
-		# 	velocities[i][1] *= -0.8  # Lose some energy on bounce
-		# 	positions[i][1] = ti.max(0, ti.min(1, positions[i][1]))
 
 
 @ti.kernel
@@ -202,43 +223,39 @@ def update_collisons():
 				# radii[i] = radii[i] + radii[j]
 				# Remove j particle
 				masses[j] = 0
-	update_radii(masses, radii, visible_radii, num_particles)
+	update_radii(masses, radii, num_particles)
 
 
 # Initialize particles
 initialize_particles()
 
 # GUI
-gui_res = (800, 800)
 
 window = ti.ui.Window("N-body simulation", gui_res, vsync=True, pos=(50, 50))
 canvas = window.get_canvas()
-canvas.set_background_color((1., 1., 1.))
+canvas.set_background_color((0., 0., 0.))
 scene = window.get_scene()
 camera = ti.ui.Camera()
 
 # Simulation loop
 while window.running:
-	# for _ in range(2):  # Substeps for stability
-	if scheme == "Euler":
-		compute_forces()
-		update_positions()
-		update_collisons()
-	elif scheme == "Verlet":
-		update_positions_Verlet()
-		update_collisons()
-
-	visible_positions.from_numpy(np.insert(positions.to_numpy(), 2, 0,
-	                                       axis=-1))
+	for i in range(step_per_frame):
+		if scheme == "Euler":
+			compute_forces()
+			update_positions()
+			update_collisons()
+		elif scheme == "Verlet":
+			update_positions_Verlet()
+			update_collisons()
 
 	# Draw particles
 	# Sun in yellow, others in white
-	camera.position(0.5, 0.5, 2.0)
-	camera.lookat(0.5, 0.5, 0)
+	camera.position(*init_camera_pos)
+	camera.lookat(*sun_pos_tuple)
 	camera.up(0, 1, 0)
-	scene.ambient_light([0.2, 0.2, 0.2])
-	scene.point_light(pos=(0.5, 0.5, 0.5), color=(1., 1., 1.))
-	scene.particles(visible_positions, 0, per_vertex_radius=radii)
+	scene.ambient_light([.5, .5, .5])
+	scene.point_light(pos=(0.5, 0.5, 1.5), color=(1., 1., 1.))
+	scene.particles(positions, 0, per_vertex_radius=radii)
 	scene.set_camera(camera)
 	canvas.scene(scene)
 	window.show()
