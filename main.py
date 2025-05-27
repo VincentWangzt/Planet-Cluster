@@ -22,23 +22,27 @@ ti.init(arch=device, default_fp=precision)
 sun_pos_tuple = (0.5, 0.5, 0.)  # Center of the screen for camera lookat
 init_camera_pos = (0.5, 0.5, 2.)  # Camera position for visualization
 gui_res = (1600, 1600)
-step_per_frame = 6  # Number of steps per frame for smoother and faster animation
+init_step_per_frame = 6  # Number of steps per frame for smoother and faster animation
+simu_fps = 30  # frames per second for simulation mode
 
 # ========================================
 
 # ========================================
 # 模拟超参数都在这里
 
-num_particles = 10000  # 星体数量
+init_num_particles = 10000  # 星体数量
 sun_mass = 1.898 * 1e27  # 中心星体质量
 particles_mass_lowerbound = 1e10  # 小行星质量下限
 particles_mass_uperbound = 1e12  #小行星质量上线
 ring_inner = 1.22e8  #球壳内半径
 ring_outer = 1.29e8  #球壳外半径
 dt = 60.  # 模拟分辨率，最好别动
+compact_rate = 0.5  # 压缩率，压缩率越大，压缩越频繁
 
 # ==================================================
 
+step_per_frame = init_step_per_frame  # Number of steps per frame for smoother animation
+num_particles = init_num_particles  # Number of particles in the simulation
 sun_pos = ti.Vector(sun_pos_tuple)  # Center of the screen
 sun_mass = sun_mass / Mass_scale  # Scale the sun mass for visualization
 particles_mass_lowerbound = particles_mass_lowerbound / Mass_scale
@@ -80,7 +84,7 @@ radii = ti.field(dtype=float, shape=num_particles)
 
 
 @ti.kernel
-def initialize_particles():
+def initialize_particles(num_particles: int):
 	# Initialize Sun
 	masses[0] = sun_mass
 	positions[0] = sun_pos
@@ -153,7 +157,7 @@ def compute_total_acceleration_on_particle(p_i, all_positions, all_masses,
                                            current_G_viz, total_num_particles,
                                            current_softening):
 	acc_sum = ti.Vector([0.0, 0.0, 0.0])
-	for p_j in range(num_particles):
+	for p_j in range(total_num_particles):
 		if p_i == p_j:
 			continue
 		acc_sum += calculate_pairwise_acceleration(p_i, p_j, all_positions,
@@ -163,7 +167,7 @@ def compute_total_acceleration_on_particle(p_i, all_positions, all_masses,
 
 
 @ti.kernel
-def compute_forces():
+def compute_forces(num_particles: int):
 	# The sun is fixed, so we don't update its velocity based on other particles
 	# But other particles affect each other and are affected by the sun
 	for i in range(num_particles):
@@ -178,7 +182,7 @@ def compute_forces():
 
 
 @ti.kernel
-def update_positions():
+def update_positions(num_particles: int):
 	for i in range(num_particles):
 		if i == 0:  # Sun is fixed
 			continue
@@ -186,7 +190,7 @@ def update_positions():
 
 
 @ti.kernel
-def update_positions_Verlet():
+def update_positions_Verlet(num_particles: int):
 
 	for i in range(num_particles):
 		if i == 0:
@@ -209,7 +213,7 @@ def update_positions_Verlet():
 
 
 @ti.kernel
-def update_collisons():
+def update_collisons(num_particles: int):
 	for i in range(num_particles):
 		for j in range(i + 1, num_particles):
 			if (positions[i] - positions[j]).norm() < (radii[i] + radii[j]):
@@ -226,8 +230,40 @@ def update_collisons():
 	update_radii(masses, radii, num_particles)
 
 
+@ti.kernel
+def compact_particles_kernel(current_num_particles: int) -> int:
+	# current_num_particles is the current total number of particles, including the sun.
+	# The sun at index 0 is always active and stays.
+	write_idx = 1  # Start writing active non-sun particles from index 1
+
+	# Iterate over non-sun particles
+	ti.loop_config(serialize=True)  # Ensure the loop is serialized for safety
+	for read_idx in range(1, current_num_particles):
+		if masses[read_idx] > 1e-9:  # Active particle threshold
+			if read_idx != write_idx:
+				# Copy data for active particle to the new 'write_idx'
+				positions[write_idx] = positions[read_idx]
+				velocities[write_idx] = velocities[read_idx]
+				masses[write_idx] = masses[read_idx]
+				radii[write_idx] = radii[read_idx]
+				positions_stock[write_idx] = positions_stock[read_idx]
+				acceleration[write_idx] = acceleration[read_idx]
+			write_idx += 1  # Increment for the next active particle
+
+	# Zero out the masses and other properties of particles that are no longer in the active list
+	# This ranges from the new count of active particles (write_idx) up to the old count (current_num_particles)
+	for i in range(write_idx, current_num_particles):
+		masses[i] = 0.0
+		velocities[i] = ti.Vector([0.0, 0.0, 0.0])
+		radii[i] = 0.0
+		positions_stock[i] = ti.Vector([0.0, 0.0, 0.0])
+		acceleration[i] = ti.Vector([0.0, 0.0, 0.0])
+
+	return write_idx  # This is the new count of total particles (sun is at 0, active particles from 1 to write_idx-1)
+
+
 # Initialize particles
-initialize_particles()
+initialize_particles(num_particles)
 
 # GUI
 
@@ -244,17 +280,24 @@ camera.lookat(*sun_pos_tuple)
 # Simulation loop
 paused = True
 restart_flag = False
+simulation = False  # Flag for accelerating simulation
 # Camera control state variables
-orbit_sun_fixed_radius = False  # Renamed from stick_to_large_ball
+orbit_sun_fixed_radius = False  # Default to not orbiting the sun with a fixed radius
 always_look_at_sun = True  # Default to looking at the sun
 
+# num_particles = 5000
+
+last_time = time.time()  # For FPS calculation
 while window.running:
-	with gui.sub_window("Controls", 0.05, 0.05, 0.2, 0.1):
+
+	with gui.sub_window("Controls", 0.05, 0.05, 0.2,
+	                    0.12):  # Adjusted height from 0.1 to 0.12
 		button_text = "Resume" if paused else "Pause"
 		if gui.button(button_text):
 			paused = not paused
 		if gui.button("Restart"):
 			restart_flag = True
+		simulation = gui.checkbox("Simulation Mode", simulation)
 
 	# Camera Controls GUI
 	with gui.sub_window("Camera Controls", 0.05, 0.16, 0.2,
@@ -271,20 +314,68 @@ while window.running:
 			orbit_sun_fixed_radius = False  # Updated variable
 			always_look_at_sun = True
 
+	# Calculate particle statistics for display
+	masses_np = masses.to_numpy()
+	# Exclude the sun (particle 0) from statistics
+	non_sun_masses_np = masses_np[1:num_particles]
+	# Consider particles with mass > 1e-9 (a small threshold) as active
+	active_particles_mask = non_sun_masses_np > 1e-9
+	active_masses_values = non_sun_masses_np[active_particles_mask]
+	num_active_particles = len(active_masses_values)
+
+	top_particles_info = []
+	if num_active_particles > 0:
+		total_mass_val = np.sum(active_masses_values)
+		# Sort active masses in descending order and get their values
+		sorted_active_masses = np.sort(active_masses_values)[::-1]
+
+		for i in range(min(10, num_active_particles)):
+			mass_val = sorted_active_masses[i]
+			percentage = (mass_val /
+			              total_mass_val) * 100 if total_mass_val > 0 else 0
+			top_particles_info.append((mass_val, percentage))
+	else:
+		total_mass_val = 0.0
+
+	# If active particles are less than half of the total particles,
+	# we copy the non-zero mass particles to the front of fields
+	# then we decrease num_particles
+	if num_particles > 1 and num_active_particles < (num_particles -
+	                                                 1) * compact_rate:
+		new_total_particles = compact_particles_kernel(num_particles)
+		if new_total_particles < num_particles and new_total_particles > 0:  # Ensure it decreased and is valid
+			num_particles = new_total_particles
+			# print(f"Compaction occurred. New num_particles: {num_particles}") # Optional debug
+
+	# Particle Statistics GUI
+	with gui.sub_window("Particle Statistics", 0.05, 0.29, 0.2,
+	                    0.3):  # x, y, width, height
+		gui.text(f"Active Particles: {num_active_particles}")
+		gui.text(f"Total Mass: {total_mass_val:.2e}")
+		gui.text("Top 10 Particles by Mass:")
+		if num_active_particles > 0:
+			for i, (mass_val, percentage) in enumerate(top_particles_info):
+				gui.text(f"  {i+1}. Mass: {mass_val:.2e} ({percentage:.2f}%)")
+		else:
+			gui.text("  No active particles.")
+
 	if restart_flag:
-		initialize_particles()
+		num_particles = init_num_particles
+		initialize_particles(num_particles)
 		paused = True  # Pause simulation after restart
 		restart_flag = False
+		simulation = False  # Reset simulation mode
+		step_per_frame = init_step_per_frame  # Reset steps per frame
 
 	if not paused:
 		for i in range(step_per_frame):
 			if scheme == "Euler":
-				compute_forces()
-				update_positions()
-				update_collisons()
+				compute_forces(num_particles)
+				update_positions(num_particles)
+				update_collisons(num_particles)
 			elif scheme == "Verlet":
-				update_positions_Verlet()
-				update_collisons()
+				update_positions_Verlet(num_particles)
+				update_collisons(num_particles)
 
 	# Draw particles
 	# Sun in yellow, others in white
@@ -337,3 +428,30 @@ while window.running:
 	scene.set_camera(camera)
 	canvas.scene(scene)
 	window.show()
+
+	current_time = time.time()
+	delta_time = current_time - last_time
+	if delta_time > 1e-9:
+		fps = 1.0 / delta_time
+	else:
+		fps = simu_fps  # Default to max_fps if delta_time is zero or too small
+	last_time = current_time
+
+	# FPS and step_per_frame adjustment logic
+	if simulation:
+		# Try to increase steps if FPS is comfortably above simu_fps
+		if fps > (simu_fps * 1.1 + 1):
+			step_per_frame *= (fps / simu_fps) / 1.1
+			step_per_frame = int(step_per_frame)
+		elif fps > simu_fps + 1:
+			# Increase steps if FPS is above simu_fps but not too high
+			step_per_frame += 1
+		# Decrease steps if FPS is lower than simu_fps, but not below init_step_per_frame
+		elif fps < simu_fps and step_per_frame > init_step_per_frame:
+			step_per_frame -= 1
+
+		# Ensure step_per_frame is at least init_step_per_frame when accelerating
+		step_per_frame = max(init_step_per_frame, step_per_frame)
+	else:
+		# Reset to initial steps per frame if acceleration is off
+		step_per_frame = init_step_per_frame
