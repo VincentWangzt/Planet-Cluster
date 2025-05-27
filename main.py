@@ -232,27 +232,105 @@ initialize_particles()
 # GUI
 
 window = ti.ui.Window("N-body simulation", gui_res, vsync=True, pos=(50, 50))
+gui = window.get_gui()
 canvas = window.get_canvas()
 canvas.set_background_color((0., 0., 0.))
 scene = window.get_scene()
 camera = ti.ui.Camera()
+camera.position(*init_camera_pos)
+camera.up(0, 1, 0)
+camera.lookat(*sun_pos_tuple)
 
 # Simulation loop
+paused = True
+restart_flag = False
+# Camera control state variables
+orbit_sun_fixed_radius = False  # Renamed from stick_to_large_ball
+always_look_at_sun = True  # Default to looking at the sun
+
 while window.running:
-	for i in range(step_per_frame):
-		if scheme == "Euler":
-			compute_forces()
-			update_positions()
-			update_collisons()
-		elif scheme == "Verlet":
-			update_positions_Verlet()
-			update_collisons()
+	with gui.sub_window("Controls", 0.05, 0.05, 0.2, 0.1):
+		button_text = "Resume" if paused else "Pause"
+		if gui.button(button_text):
+			paused = not paused
+		if gui.button("Restart"):
+			restart_flag = True
+
+	# Camera Controls GUI
+	with gui.sub_window("Camera Controls", 0.05, 0.16, 0.2,
+	                    0.12):  # Positioned below "Controls"
+		orbit_sun_fixed_radius = gui.checkbox(
+		    "Orbit Sun (Radius 2)",
+		    orbit_sun_fixed_radius)  # Updated label and variable
+		always_look_at_sun = gui.checkbox("Always look at Sun",
+		                                  always_look_at_sun)
+		if gui.button("Reset Camera"):
+			camera.position(*init_camera_pos)
+			camera.lookat(*sun_pos_tuple)
+			# Reset control states to default
+			orbit_sun_fixed_radius = False  # Updated variable
+			always_look_at_sun = True
+
+	if restart_flag:
+		initialize_particles()
+		paused = True  # Pause simulation after restart
+		restart_flag = False
+
+	if not paused:
+		for i in range(step_per_frame):
+			if scheme == "Euler":
+				compute_forces()
+				update_positions()
+				update_collisons()
+			elif scheme == "Verlet":
+				update_positions_Verlet()
+				update_collisons()
 
 	# Draw particles
 	# Sun in yellow, others in white
-	camera.position(*init_camera_pos)
-	camera.lookat(*sun_pos_tuple)
-	camera.up(0, 1, 0)
+
+	# Camera logic update
+	if orbit_sun_fixed_radius:
+		camera.track_user_inputs(
+		    window, movement_speed=0.01,
+		    hold_key=ti.ui.SHIFT)  # Get user's intended movement/orientation
+
+		current_cam_pos = camera.curr_position  # This is a tuple (x,y,z)
+		# sun_pos_tuple is (0.5, 0.5, 0.0)
+
+		# Calculate vector from sun to current camera position
+		vec_to_cam_x = current_cam_pos[0] - sun_pos_tuple[0]
+		vec_to_cam_y = current_cam_pos[1] - sun_pos_tuple[1]
+		vec_to_cam_z = current_cam_pos[2] - sun_pos_tuple[2]
+
+		current_dist_from_sun = (vec_to_cam_x**2 + vec_to_cam_y**2 +
+		                         vec_to_cam_z**2)**0.5
+		desired_radius = 2.0
+
+		if current_dist_from_sun > 1e-6:  # Avoid division by zero if camera is at sun's center
+			# Normalize the vector and scale it to the desired_radius
+			norm_factor = desired_radius / current_dist_from_sun
+			new_cam_x = sun_pos_tuple[0] + vec_to_cam_x * norm_factor
+			new_cam_y = sun_pos_tuple[1] + vec_to_cam_y * norm_factor
+			new_cam_z = sun_pos_tuple[2] + vec_to_cam_z * norm_factor
+			camera.position(new_cam_x, new_cam_y, new_cam_z)
+		else:
+			# If camera is at sun's center, place it at a default position on the sphere
+			camera.position(sun_pos_tuple[0], sun_pos_tuple[1],
+			                sun_pos_tuple[2] + desired_radius)
+
+		if always_look_at_sun:
+			camera.lookat(*sun_pos_tuple)
+		# If not always_look_at_sun, the look_at direction from track_user_inputs is maintained
+		# as camera.position() only changes position, not look_at.
+	else:  # orbit_sun_fixed_radius is False
+		camera.track_user_inputs(window,
+		                         movement_speed=0.01,
+		                         hold_key=ti.ui.SHIFT)
+		if always_look_at_sun:
+			camera.lookat(*sun_pos_tuple)
+
+	# camera.lookat(*sun_pos_tuple) # This line is now handled by the logic above
 	scene.ambient_light([.5, .5, .5])
 	scene.point_light(pos=(0.5, 0.5, 1.5), color=(1., 1., 1.))
 	scene.particles(positions, 0, per_vertex_radius=radii)
