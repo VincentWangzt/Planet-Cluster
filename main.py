@@ -217,21 +217,28 @@ def update_positions_Verlet(num_particles: int):
 
 
 @ti.kernel
-def update_collisons(num_particles: int):
+def update_collisons(num_particles: int) -> bool:
+	flag = False
+	# ti.loop_config(serialize=True)  # Ensure the loop is serialized for safety
 	for i in range(num_particles):
 		for j in range(i + 1, num_particles):
 			if (positions[i] - positions[j]).norm() < (radii[i] + radii[j]):
 				# Handle collision
+				if masses[i] != 0 and masses[j] != 0:
+					flag = True
 				# For simplicity, we can just merge the particles
+				positions[i] = (positions[i] *
+				                (masses[i] + 1e-6) + positions[j] *
+				                (masses[j] + 1e-6)) / (masses[i] + masses[j] +
+				                                       2e-6)
+				velocities[i] = (velocities[i] *
+				                 (masses[i] + 1e-6) + velocities[j] *
+				                 (masses[j] + 1e-6)) / (masses[i] + masses[j] +
+				                                        2e-6)
 				masses[i] += masses[j]
-				positions[i] = (positions[i] * masses[i] + positions[j] *
-				                masses[j]) / (masses[i] + masses[j])
-				velocities[i] = (velocities[i] * masses[i] + velocities[j] *
-				                 masses[j]) / (masses[i] + masses[j])
-				# radii[i] = radii[i] + radii[j]
-				# Remove j particle
 				masses[j] = 0
 	update_radii(masses, radii, num_particles)
+	return flag
 
 
 @ti.kernel
@@ -473,10 +480,12 @@ while window.running:
 			if scheme == "Euler":
 				compute_forces(num_particles)
 				update_positions(num_particles)
-				update_collisons(num_particles)
+				while update_collisons(num_particles):
+					pass
 			elif scheme == "Verlet":
 				update_positions_Verlet(num_particles)
-				update_collisons(num_particles)
+				while update_collisons(num_particles):
+					pass
 		total_simulated_time += unscaled_dt_value * step_per_frame  # Added: Increment total_simulated_time
 
 	# Draw particles
