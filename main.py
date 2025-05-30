@@ -3,11 +3,12 @@ import numpy as np
 import time
 
 # TODO:
-# - collision rewrite -> faster
-# - bit mask
-# - pack the fields together
-# - integrate initialization
-# - visualization improvements
+# - collision debug
+# + distance visualization
+# - change radii coeff -> density
+# + add number of particles within a certain distance
+# - argument parser
+# + total time
 
 precision = ti.f32
 device = ti.gpu
@@ -38,6 +39,7 @@ ring_inner = 1.22e8  #球壳内半径
 ring_outer = 1.29e8  #球壳外半径
 original_dt_value = 60.  # 模拟分辨率 (seconds per simulation step in model time)
 compact_rate = 0.5  # 压缩率，压缩率越大，压缩越频繁
+DIST_ACTIVE_THRESHOLD_SIM_UNITS = 5.0  # Distance threshold for dist-active particles in simulation units
 
 # ==================================================
 
@@ -290,12 +292,14 @@ always_look_at_sun = True  # Default to looking at the sun
 
 # num_particles = 5000
 fps = 1
+total_simulated_time = 0.0  # Added: Initialize total simulated time
 
 last_time = time.time()  # For FPS calculation
 while window.running:
 
-	with gui.sub_window("Controls", 0.05, 0.05, 0.2,
-	                    0.25):  # Adjusted height to 0.25
+	with gui.sub_window(
+	    "Controls", 0.02, 0.05, 0.23,
+	    0.25):  # Adjusted x from 0.05 to 0.02, w from 0.2 to 0.23
 		button_text = "Resume" if paused else "Pause"
 		if gui.button(button_text):
 			paused = not paused
@@ -335,9 +339,9 @@ while window.running:
 	# Camera Controls GUI
 	with gui.sub_window(
 	    "Camera Controls",
-	    0.05,
+	    0.02,  # Adjusted x from 0.05 to 0.02
 	    0.31,
-	    0.2,  # y changed from 0.26 to 0.31
+	    0.23,  # Adjusted w from 0.2 to 0.23
 	    0.12):  # Positioned below "Controls"
 		orbit_sun_fixed_radius = gui.checkbox(
 		    "Orbit Sun (Radius 2)",
@@ -353,24 +357,50 @@ while window.running:
 
 	# Calculate particle statistics for display
 	masses_np = masses.to_numpy()
-	# Exclude the sun (particle 0) from statistics
-	non_sun_masses_np = masses_np[1:num_particles]
+	positions_np = positions.to_numpy()
+	sun_actual_pos_np = positions_np[0]  # Sun's current position
+
 	# Consider particles with mass > 1e-9 (a small threshold) as active
+	# Exclude the sun (particle 0) from statistics initially
+	non_sun_masses_np = masses_np[1:num_particles]
+	non_sun_positions_np = positions_np[1:num_particles]
+
 	active_particles_mask = non_sun_masses_np > 1e-9
 	active_masses_values = non_sun_masses_np[active_particles_mask]
+	active_positions_values = non_sun_positions_np[active_particles_mask]
+
 	num_active_particles = len(active_masses_values)
 
+	# Calculate dist-active particles (non-sun particles within a distance threshold from the sun)
+	num_dist_active_particles = 0
+	if num_active_particles > 1:  # If there are any non-sun particles
+		# These are the positions of all non-sun particles currently in the simulation
+		distances_from_sun = np.linalg.norm(active_positions_values -
+		                                    sun_actual_pos_np,
+		                                    axis=1)
+		num_dist_active_particles = np.sum(
+		    distances_from_sun < DIST_ACTIVE_THRESHOLD_SIM_UNITS)
+
 	top_particles_info = []
+
 	if num_active_particles > 0:
+		# Sort active masses in descending order and get their original indices within the active_masses_values array
+		sorted_indices_of_active = np.argsort(active_masses_values)[::-1]
+
 		total_mass_val = np.sum(active_masses_values)
-		# Sort active masses in descending order and get their values
-		sorted_active_masses = np.sort(active_masses_values)[::-1]
 
 		for i in range(min(10, num_active_particles)):
-			mass_val = sorted_active_masses[i]
+			# Get the index in the sorted list
+			sorted_idx = sorted_indices_of_active[i]
+
+			# Get mass and position of this particle
+			mass_val = active_masses_values[sorted_idx]
+			pos_val = active_positions_values[sorted_idx]
+
+			distance_to_sun = np.linalg.norm(pos_val - sun_actual_pos_np)
 			percentage = (mass_val /
 			              total_mass_val) * 100 if total_mass_val > 0 else 0
-			top_particles_info.append((mass_val, percentage))
+			top_particles_info.append((mass_val, percentage, distance_to_sun))
 	else:
 		total_mass_val = 0.0
 
@@ -385,39 +415,47 @@ while window.running:
 			# print(f"Auto compaction. New num_particles: {num_particles}") # Optional debug
 
 	# Particle Statistics GUI
-	with gui.sub_window("Particle Statistics", 0.05, 0.44, 0.2,
-	                    0.35):  # Adjusted height from 0.3 to 0.35
-		gui.text(f"Active Particles: {num_particles}")  # Added
+	with gui.sub_window(
+	    "Particle Statistics", 0.02, 0.44, 0.23,
+	    0.38):  # Adjusted x from 0.05 to 0.02, w from 0.2 to 0.23
+		gui.text(f"Active Particles: {num_particles}")
+		gui.text(f"Effective Particles: {num_active_particles}")
 		gui.text(
-		    f"Effective Particles: {num_active_particles}")  # Changed label
-		if gui.button("Compact Particles Manually"):  # Added button
+		    f"Dist-Active (<{DIST_ACTIVE_THRESHOLD_SIM_UNITS:.1f} units): {num_dist_active_particles}"
+		)  # Added
+		if gui.button("Compact Particles Manually"):
 			if num_particles > 1:  # Ensure there's more than just the sun
 				new_compacted_num = compact_particles_kernel(num_particles)
 				if new_compacted_num < num_particles and new_compacted_num > 0:
 					num_particles = new_compacted_num
 					# print(f"Manual compaction. New num_particles: {num_particles}")
-		gui.text(f"Sun Mass: {masses_np[0]:.2e}")  # Added Sun Mass display
+		gui.text(f"Sun Mass: {masses_np[0]:.2e}")
 		gui.text(f"Total Mass: {total_mass_val:.2e}")
 		gui.text("Top 10 Particles by Mass:")
 		if num_active_particles > 0:
-			for i, (mass_val, percentage) in enumerate(top_particles_info):
-				gui.text(f"  {i+1}. Mass: {mass_val:.2e} ({percentage:.2f}%)")
+			for i, (mass_val, percentage,
+			        distance_val) in enumerate(top_particles_info):
+				gui.text(
+				    f"  {i+1}. Mass: {mass_val:.2e} ({percentage:.2f}%) Dist: {distance_val*Length_scale:.2e} (m)"
+				)
 		else:
 			gui.text("  No active particles.")
 
 	# Simulation Info GUI
 	with gui.sub_window(
 	    "Simulation Info",
-	    0.05,
-	    0.80,  # Adjusted y from 0.75 to 0.80
-	    0.2,
-	    0.14):  # Height remains 0.14
+	    0.02,  # Adjusted x from 0.05 to 0.02
+	    0.80,
+	    0.23,  # Adjusted w from 0.2 to 0.23
+	    0.16
+	):  # Height remains 0.14 -> Adjusted to 0.16 to make space for new text
 		gui.text(f"Target FPS: {target_fps}")
 		gui.text(f"Actual FPS: {fps:.2f}")  # Added Actual FPS display
 		gui.text(f"Step per frame: {step_per_frame}")
 		time_speed_up_factor = unscaled_dt_value * step_per_frame * fps * int(
 		    not paused)  # Calculate based on original dt
 		gui.text(f"Time Speed Up: {time_speed_up_factor:.2f}x")
+		gui.text(f"Total Time Simulated: {total_simulated_time:.2e}s")  # Added
 
 	if restart_flag:
 		num_particles = init_num_particles
@@ -428,6 +466,7 @@ while window.running:
 		display_mode = False  # Reset display mode
 		step_per_frame = init_step_per_frame  # Reset steps per frame
 		target_fps = init_target_fps  # Reset target_fps
+		total_simulated_time = 0.0  # Added: Reset total_simulated_time
 
 	if not paused:
 		for i in range(step_per_frame):
@@ -438,6 +477,7 @@ while window.running:
 			elif scheme == "Verlet":
 				update_positions_Verlet(num_particles)
 				update_collisons(num_particles)
+		total_simulated_time += unscaled_dt_value * step_per_frame  # Added: Increment total_simulated_time
 
 	# Draw particles
 	# Sun in yellow, others in white
