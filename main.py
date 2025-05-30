@@ -1,6 +1,7 @@
 import taichi as ti
 import numpy as np
 import time
+import argparse  # Added import
 
 # TODO:
 # - collision debug
@@ -12,18 +13,88 @@ import time
 
 precision = ti.f32
 device = ti.gpu
-Length_scale = 2.44e8
-Mass_scale = 5e10  # Scale for masses to make them visually significant
-Time_scale = 3600 * 1e7  # Scale for time to make the simulation run at a reasonable speed
+# Length_scale = 2.44e8 # Will be replaced by args
+# Mass_scale = 5e10  # Scale for masses to make them visually significant # Will be replaced by args
+# Time_scale = 3600 * 1e7  # Scale for time to make the simulation run at a reasonable speed # Will be replaced by args
 ti.init(arch=device, default_fp=precision)
 
+# =========================================
+# Command line arguments setup
+parser = argparse.ArgumentParser(description="N-body simulation with Taichi")
+parser.add_argument('--gui_res_width',
+                    type=int,
+                    default=1600,
+                    help='GUI window width')
+parser.add_argument('--gui_res_height',
+                    type=int,
+                    default=1600,
+                    help='GUI window height')
+parser.add_argument('--init_step_per_frame',
+                    type=int,
+                    default=6,
+                    help='Initial number of simulation steps per frame')
+parser.add_argument('--init_num_particles',
+                    type=int,
+                    default=10000,
+                    help='Initial number of particles')
+parser.add_argument(
+    '--sun_mass_val',
+    type=float,
+    default=1.898e27,
+    help='Mass of the central star (e.g., Sun)')  # Renamed to avoid conflict
+parser.add_argument('--original_dt_value',
+                    type=float,
+                    default=60.0,
+                    help='Simulation time step in seconds (model time)')
+parser.add_argument('--compact_rate',
+                    type=float,
+                    default=0.5,
+                    help='Compaction rate for particle removal')
+parser.add_argument(
+    '--dist_active_threshold_sim_units',
+    type=float,
+    default=5.0,
+    help='Distance threshold for dist-active particles in simulation units')
+parser.add_argument('--length_scale',
+                    type=float,
+                    default=2.44e8,
+                    help='Length scale for simulation units')
+parser.add_argument('--mass_scale',
+                    type=float,
+                    default=5e10,
+                    help='Mass scale for simulation units')
+parser.add_argument('--time_scale',
+                    type=float,
+                    default=3600 * 1e7,
+                    help='Time scale for simulation units')
+parser.add_argument(
+    '--radii_coeff',
+    type=float,
+    default=6e-4,
+    help='Coefficient for converting mass to radius for particles')
+parser.add_argument('--sun_radii_coeff',
+                    type=float,
+                    default=1e-4,
+                    help='Additional coefficient for sun radius')
+parser.add_argument('--scheme',
+                    type=str,
+                    default="Verlet",
+                    choices=['Euler', 'Verlet'],
+                    help='Integration scheme (Euler or Verlet)')
+
+args = parser.parse_args()
+
+# Use parsed arguments
+Length_scale = args.length_scale
+Mass_scale = args.mass_scale
+Time_scale = args.time_scale
 # =========================================
 # 可视化常数
 
 sun_pos_tuple = (0.5, 0.5, 0.)  # Center of the screen for camera lookat
 init_camera_pos = (0.5, 0.5, 2.)  # Camera position for visualization
-gui_res = (1600, 1600)
-init_step_per_frame = 6  # Number of steps per frame for smoother and faster animation
+gui_res = (args.gui_res_width, args.gui_res_height)  # Use parsed args
+init_step_per_frame = args.init_step_per_frame  # Use parsed args
 init_target_fps = 30  # Target FPS for simulation and display modes
 
 # ========================================
@@ -31,15 +102,15 @@ init_target_fps = 30  # Target FPS for simulation and display modes
 # ========================================
 # 模拟超参数都在这里
 
-init_num_particles = 10000  # 星体数量
-sun_mass = 1.898 * 1e27  # 中心星体质量
+init_num_particles = args.init_num_particles  # 星体数量 # Use parsed args
+sun_mass_val = args.sun_mass_val  # 中心星体质量 # Use parsed args, renamed from sun_mass to avoid conflict later
 particles_mass_lowerbound = 1e10  # 小行星质量下限
 particles_mass_uperbound = 1e12  #小行星质量上线
 ring_inner = 1.22e8  #球壳内半径
 ring_outer = 1.29e8  #球壳外半径
-original_dt_value = 60.  # 模拟分辨率 (seconds per simulation step in model time)
-compact_rate = 0.5  # 压缩率，压缩率越大，压缩越频繁
-DIST_ACTIVE_THRESHOLD_SIM_UNITS = 5.0  # Distance threshold for dist-active particles in simulation units
+original_dt_value = args.original_dt_value  # 模拟分辨率 (seconds per simulation step in model time) # Use parsed args
+compact_rate = args.compact_rate  # 压缩率，压缩率越大，压缩越频繁 # Use parsed args
+DIST_ACTIVE_THRESHOLD_SIM_UNITS = args.dist_active_threshold_sim_units  # Distance threshold for dist-active particles in simulation units # Use parsed args
 
 # ==================================================
 
@@ -48,7 +119,7 @@ step_per_frame = init_step_per_frame  # Number of steps per frame for smoother a
 target_fps = init_target_fps  # Initialize target_fps
 num_particles = init_num_particles  # Number of particles in the simulation
 sun_pos = ti.Vector(sun_pos_tuple)  # Center of the screen
-sun_mass = sun_mass / Mass_scale  # Scale the sun mass for visualization
+sun_mass = args.sun_mass_val / Mass_scale  # Scale the sun mass for visualization # Use sun_mass_val
 particles_mass_lowerbound = particles_mass_lowerbound / Mass_scale
 particles_mass_uperbound = particles_mass_uperbound / Mass_scale
 particles_mass_width = particles_mass_uperbound - particles_mass_lowerbound
@@ -68,11 +139,11 @@ G = 6.67430e-11  # Gravitational constant - using a scaled value for visualizati
 G_viz = G * Time_scale**2 / (Length_scale**3 / Mass_scale)
 
 # radius calculation
-radii_coeff = 6e-4  # coefficient for converting mass to radius
-sun_radii_coeff = 1e-4  # additional coefficient for sun radius
+radii_coeff = args.radii_coeff  # coefficient for converting mass to radius # Use parsed args
+sun_radii_coeff = args.sun_radii_coeff  # additional coefficient for sun radius # Use parsed args
 
 softening_dis = radii_coeff
-scheme = "Verlet"  # "Euler" or "Verlet"
+scheme = args.scheme  # "Euler" or "Verlet" # Use parsed args
 vec = ti.types.vector(3, dtype=float)
 
 # Particle properties
