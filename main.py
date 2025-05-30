@@ -377,7 +377,7 @@ while window.running:
 
 	with gui.sub_window(
 	    "Controls", 0.02, 0.05, 0.23,
-	    0.25):  # Adjusted x from 0.05 to 0.02, w from 0.2 to 0.23
+	    0.15):  # Adjusted x from 0.05 to 0.02, w from 0.2 to 0.23
 		button_text = "Resume" if paused else "Pause"
 		if gui.button(button_text):
 			paused = not paused
@@ -418,7 +418,7 @@ while window.running:
 	with gui.sub_window(
 	    "Camera Controls",
 	    0.02,  # Adjusted x from 0.05 to 0.02
-	    0.31,
+	    0.21,
 	    0.23,  # Adjusted w from 0.2 to 0.23
 	    0.12):  # Positioned below "Controls"
 		orbit_sun_fixed_radius = gui.checkbox(
@@ -494,8 +494,8 @@ while window.running:
 
 	# Particle Statistics GUI
 	with gui.sub_window(
-	    "Particle Statistics", 0.02, 0.44, 0.23,
-	    0.38):  # Adjusted x from 0.05 to 0.02, w from 0.2 to 0.23
+	    "Particle Statistics", 0.02, 0.34, 0.23,
+	    0.25):  # Adjusted x from 0.05 to 0.02, w from 0.2 to 0.23
 		gui.text(f"Active Particles: {num_particles}")
 		gui.text(f"Effective Particles: {num_active_particles}")
 		gui.text(
@@ -523,7 +523,7 @@ while window.running:
 	with gui.sub_window(
 	    "Simulation Info",
 	    0.02,  # Adjusted x from 0.05 to 0.02
-	    0.80,
+	    0.60,
 	    0.23,  # Adjusted w from 0.2 to 0.23
 	    0.16
 	):  # Height remains 0.14 -> Adjusted to 0.16 to make space for new text

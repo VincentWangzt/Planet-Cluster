@@ -23,3 +23,5 @@ To run the simulation, use the following command:
 ```bash
 python main.py
 ```
+
+We provide various configurable commandline arguments, see the details with `python main.py -h`
